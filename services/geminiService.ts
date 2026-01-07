@@ -1,66 +1,76 @@
-import { GoogleGenAI, Type } from '@google/genai';
-import { ColorInfo } from '../types';
 
-export const getDunhuangColorNames = async (colors: ColorInfo[]): Promise<ColorInfo[]> => {
-  if (!process.env.API_KEY) {
-    console.warn("API Key not found");
-    return colors;
-  }
+import { GoogleGenAI, Type, GenerateContentResponse } from "@google/genai";
+import { ColorInfo } from "../types";
 
+/**
+ * Uses Gemini AI to analyze extracted hex colors in the historical context of Dunhuang Mogao pigments.
+ * Returns enriched color data with traditional names and cultural descriptions.
+ */
+export const analyzeColorsWithAI = async (colors: ColorInfo[]): Promise<ColorInfo[]> => {
+  // Create a fresh client instance to ensure up-to-date configuration
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-  const hexList = colors.map(c => c.hex).join(', ');
+  const colorList = colors.map(c => c.hex).join(', ');
+  
+  // Use gemini-3-flash-preview for high-performance knowledge retrieval
+  const response: GenerateContentResponse = await ai.models.generateContent({
+    model: 'gemini-3-flash-preview',
+    contents: `Analyze these hex colors in the context of Dunhuang Mogao Caves mural pigments: ${colorList}. Provide traditional Chinese pigment names (like 朱砂, 石青, 雌黄), English names, Pinyin, and a brief cultural description of their use in Dunhuang.`,
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            hex: {
+              type: Type.STRING,
+              description: 'The hex code of the analyzed color.',
+            },
+            name: {
+              type: Type.STRING,
+              description: 'Traditional Chinese pigment name.',
+            },
+            enName: {
+              type: Type.STRING,
+              description: 'English name of the pigment.',
+            },
+            pinyin: {
+              type: Type.STRING,
+              description: 'Standard Pinyin for the Chinese name.',
+            },
+            description: {
+              type: Type.STRING,
+              description: 'Contextual cultural description of the pigment in Dunhuang murals.',
+            },
+          },
+          required: ["hex", "name", "enName", "pinyin", "description"],
+          propertyOrdering: ["hex", "name", "enName", "pinyin", "description"]
+        },
+      },
+    },
+  });
 
-  const prompt = `
-    You are an expert in traditional Chinese art and Dunhuang mural pigments.
-    For the following list of HEX color codes, identify a poetic, traditional Chinese name that fits the Dunhuang aesthetic (e.g., Cinnabar, Ochre, Malachite, Azurite).
-    Also provide an English translation and Pinyin.
-    
-    Hex Codes: ${hexList}
-  `;
+  const text = response.text;
+  if (!text) return colors;
 
   try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              hex: { type: Type.STRING },
-              name: { type: Type.STRING, description: "Traditional Chinese Name" },
-              pinyin: { type: Type.STRING },
-              enName: { type: Type.STRING, description: "English Name" },
-              description: { type: Type.STRING, description: "Short cultural context (max 10 words)" }
-            },
-            required: ["hex", "name", "enName"]
-          }
-        }
-      }
-    });
-
-    const generatedData = JSON.parse(response.text || "[]");
-    
-    // Merge AI data back into color objects
-    return colors.map(color => {
-      const match = generatedData.find((d: any) => d.hex.toLowerCase() === color.hex.toLowerCase());
+    const aiResults = JSON.parse(text.trim());
+    return colors.map(c => {
+      // Find matching identification from AI results
+      const match = aiResults.find((r: any) => r.hex.toLowerCase() === c.hex.toLowerCase());
       if (match) {
-        return {
-          ...color,
+        return { 
+          ...c, 
           name: match.name,
-          pinyin: match.pinyin,
           enName: match.enName,
+          pinyin: match.pinyin,
           description: match.description
         };
       }
-      return color;
+      return c;
     });
-
-  } catch (error) {
-    console.error("Gemini AI Error:", error);
-    // Return original colors if AI fails
-    return colors.map(c => ({...c, name: "Unknown", enName: "Custom Color"}));
+  } catch (e) {
+    console.error("Failed to parse Gemini pigment analysis", e);
+    return colors;
   }
 };

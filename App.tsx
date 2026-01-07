@@ -1,279 +1,151 @@
-import React, { useState, useEffect, useRef } from 'react';
+
+import React, { useState, useRef } from 'react';
 import { Header } from './components/Header';
 import { ControlPanel } from './components/ControlPanel';
 import { PaletteDisplay } from './components/PaletteDisplay';
-import { extractColors, generatePaletteImage } from './services/colorService';
-import { getDunhuangColorNames } from './services/geminiService';
-import { DEFAULT_SETTINGS, MOCK_PALETTE_NAME } from './constants';
-import { Palette, ProcessingSettings } from './types';
+import { ColorInfo, ProcessingSettings } from './types';
+import { extractColorsFromImage } from './services/colorService';
+import { analyzeColorsWithAI } from './services/geminiService';
 
-function App() {
-  const [currentImage, setCurrentImage] = useState<string | null>(null);
-  const [palette, setPalette] = useState<Palette | null>(null);
-  const [savedPalettes, setSavedPalettes] = useState<Palette[]>([]);
-  const [settings, setSettings] = useState<ProcessingSettings>(DEFAULT_SETTINGS);
+/**
+ * Main application component for Dunhuang Color Extraction.
+ * Orchestrates local color extraction and cloud-based AI pigment identification.
+ */
+const App = () => {
+  const [image, setImage] = useState<string | null>(null);
+  const [colors, setColors] = useState<ColorInfo[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [settings, setSettings] = useState<ProcessingSettings>({
+    colorCount: 6,
+    samplePrecision: 5,
+    brighten: false,
+    ignoreGrayscale: true
+  });
   
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [isNaming, setIsNaming] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Load Saved Palettes
-  useEffect(() => {
-    const saved = localStorage.getItem('dunhuang_palettes');
-    if (saved) {
-      try {
-        setSavedPalettes(JSON.parse(saved));
-      } catch (e) {
-        console.error("Failed to load history", e);
-      }
-    }
-  }, []);
-
-  // Process Image when Image or Settings change
-  useEffect(() => {
-    if (!currentImage) return;
-
-    const process = async () => {
-      setIsProcessing(true);
-      setError(null);
-      setIsNaming(false);
-
-      try {
-        const extractedColors = await extractColors(currentImage, settings);
-        
-        const tempPalette: Palette = {
-          id: Date.now().toString(),
-          name: MOCK_PALETTE_NAME,
-          colors: extractedColors,
-          createdAt: Date.now(),
-          sourceImage: currentImage
-        };
-        setPalette(tempPalette);
-        setIsProcessing(false);
-
-        setIsNaming(true);
-        const namedColors = await getDunhuangColorNames(extractedColors);
-        
-        setPalette(prev => prev ? { ...prev, colors: namedColors } : null);
-      } catch (err) {
-        console.error(err);
-        setError("Failed to process image. Please try a different file.");
-      } finally {
-        setIsProcessing(false);
-        setIsNaming(false);
-      }
-    };
-
-    const timer = setTimeout(process, 300);
-    return () => clearTimeout(timer);
-
-  }, [currentImage, settings.colorCount, settings.ignoreGrayscale, settings.samplePrecision, settings.brighten]);
-
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file) return;
-
-    if (file.size > 10 * 1024 * 1024) {
-      setError("Image size exceeds 10MB limit.");
-      return;
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = async (event) => {
+        const src = event.target?.result as string;
+        setImage(src);
+        processImage(src, settings);
+      };
+      reader.readAsDataURL(file);
     }
-
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      if (typeof ev.target?.result === 'string') {
-        setCurrentImage(ev.target.result);
-      }
-    };
-    reader.readAsDataURL(file);
   };
 
-  const savePalette = () => {
-    if (!palette) return;
-    const newSaved = [palette, ...savedPalettes];
-    setSavedPalettes(newSaved);
-    localStorage.setItem('dunhuang_palettes', JSON.stringify(newSaved));
-    alert("Palette saved to collection!");
+  const processImage = async (src: string, currentSettings: ProcessingSettings) => {
+    setLoading(true);
+    try {
+      // Phase 1: Local Algorithm (K-Means) for dominant color extraction
+      const extracted = await extractColorsFromImage(src, currentSettings);
+      setColors(extracted);
+      setLoading(false);
+      
+      // Phase 2: AI Enrichment (Gemini) for pigment identification
+      setAnalyzing(true);
+      const enriched = await analyzeColorsWithAI(extracted);
+      setColors(enriched);
+    } catch (err) {
+      console.error("Mural analysis failed:", err);
+      setLoading(false);
+    } finally {
+      setAnalyzing(false);
+    }
   };
 
-  const exportJSON = () => {
-    if (!palette) return;
-    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(palette, null, 2));
-    const downloadAnchorNode = document.createElement('a');
-    downloadAnchorNode.setAttribute("href", dataStr);
-    downloadAnchorNode.setAttribute("download", `dunhuang-palette-${palette.id}.json`);
-    document.body.appendChild(downloadAnchorNode);
-    downloadAnchorNode.click();
-    downloadAnchorNode.remove();
-  };
-
-  const exportCSS = () => {
-    if (!palette) return;
-    let cssContent = ":root {\n";
-    palette.colors.forEach((c, i) => {
-      const safeName = c.enName ? c.enName.toLowerCase().replace(/\s+/g, '-') : `color-${i+1}`;
-      cssContent += `  --dunhuang-${safeName}: ${c.hex};\n`;
-    });
-    cssContent += "}\n";
-    
-    const dataStr = "data:text/css;charset=utf-8," + encodeURIComponent(cssContent);
-    const downloadAnchorNode = document.createElement('a');
-    downloadAnchorNode.setAttribute("href", dataStr);
-    downloadAnchorNode.setAttribute("download", `dunhuang-vars-${palette.id}.css`);
-    document.body.appendChild(downloadAnchorNode);
-    downloadAnchorNode.click();
-    downloadAnchorNode.remove();
-  };
-
-  const exportPNG = async () => {
-    if (!palette) return;
-    const dataUrl = await generatePaletteImage(palette.colors, palette.name);
-    if (!dataUrl) return;
-    
-    const link = document.createElement('a');
-    link.download = `dunhuang-card-${palette.id}.png`;
-    link.href = dataUrl;
-    link.click();
-  };
-
-  const [isDragOver, setIsDragOver] = useState(false);
-  const handleDragOver = (e: React.DragEvent) => { e.preventDefault(); setIsDragOver(true); };
-  const handleDragLeave = () => setIsDragOver(false);
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragOver(false);
-    const file = e.dataTransfer.files[0];
-    if (file && file.type.startsWith('image/')) {
-        if (file.size > 10 * 1024 * 1024) {
-            setError("Image size exceeds 10MB limit.");
-            return;
-        }
-        const reader = new FileReader();
-        reader.onload = (ev) => {
-            if (typeof ev.target?.result === 'string') {
-                setCurrentImage(ev.target.result);
-            }
-        };
-        reader.readAsDataURL(file);
+  const handleSettingsUpdate = (newSettings: ProcessingSettings) => {
+    setSettings(newSettings);
+    if (image) {
+      processImage(image, newSettings);
     }
   };
 
   return (
-    <div className="min-h-screen pb-12">
+    <div className="min-h-screen bg-[#FDFBF7] text-[#3E3832] pb-20">
       <Header />
       
-      <main className="container mx-auto px-4 mt-8 grid grid-cols-1 lg:grid-cols-12 gap-8">
-        
-        {/* Left Column: Upload & Controls */}
-        <div className="lg:col-span-4 space-y-6">
+      <main className="container mx-auto px-4 mt-8 max-w-6xl">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
           
-          {/* Upload Area */}
-          <div 
-            className={`
-              relative border-2 border-dashed rounded-xl p-8 text-center transition-all cursor-pointer
-              ${isDragOver ? 'border-[#A84C32] bg-[#A84C32]/10' : 'border-[#D8C29D] hover:border-[#A84C32] bg-white/40'}
-            `}
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
-            onDrop={handleDrop}
-            onClick={() => fileInputRef.current?.click()}
-          >
+          {/* Mural Preview & Controls */}
+          <div className="lg:col-span-4 space-y-6">
+            <div 
+              onClick={() => fileInputRef.current?.click()}
+              className="group relative aspect-video bg-white border-2 border-dashed border-[#D8C29D] rounded-xl overflow-hidden cursor-pointer hover:border-[#A84C32] transition-colors shadow-sm"
+            >
+              {image ? (
+                <img src={image} alt="Mural Preview" className="w-full h-full object-cover" />
+              ) : (
+                <div className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center">
+                  <span className="text-4xl mb-2">🖼️</span>
+                  <p className="serif font-bold text-[#8C7B6C]">Upload Mural Segment</p>
+                  <p className="text-[10px] text-gray-400 mt-1 uppercase tracking-widest font-mono">JPG / PNG / WEBP</p>
+                </div>
+              )}
+              <div className="absolute inset-0 bg-black/0 group-hover:bg-black/5 transition-colors" />
+            </div>
+            
             <input 
+              ref={fileInputRef}
               type="file" 
-              ref={fileInputRef} 
               className="hidden" 
-              accept="image/png, image/jpeg, image/webp" 
-              onChange={handleFileUpload}
+              accept="image/*" 
+              onChange={handleImageUpload} 
             />
-            
-            {currentImage ? (
-              <img src={currentImage} alt="Preview" className="mx-auto max-h-48 rounded shadow-lg object-contain" />
-            ) : (
-              <div className="text-[#8C7B6C]">
-                 <svg className="w-12 h-12 mx-auto mb-2 text-[#A84C32]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                 </svg>
-                 <p className="serif text-lg font-bold">Drop image or click to upload</p>
-                 <p className="text-sm mt-1">JPG, PNG, WebP (Max 10MB)</p>
-              </div>
-            )}
-            
-            {isProcessing && (
-              <div className="absolute inset-0 bg-white/80 backdrop-blur-sm flex items-center justify-center rounded-xl">
-                 <div className="cloud-loader"></div>
-              </div>
-            )}
+
+            <ControlPanel 
+              settings={settings} 
+              onUpdate={handleSettingsUpdate} 
+              disabled={loading || analyzing}
+            />
+
+            <div className="p-4 bg-[#E5D5C0]/20 rounded-lg border border-[#E5D5C0] text-xs leading-relaxed italic text-[#8C7B6C]">
+              Note: Mineral pigments used in Dunhuang murals often oxidize over time. Cinnabar may darken, and Minium often turns black. Use "PCCS Brighten" to view potential original states.
+            </div>
           </div>
-          
-          {error && <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded relative">{error}</div>}
 
-          <ControlPanel 
-            settings={settings} 
-            onUpdate={setSettings} 
-            disabled={isProcessing} 
-          />
-        </div>
-
-        {/* Right Column: Palette Display & Actions */}
-        <div className="lg:col-span-8">
-          
-          {/* Actions Bar */}
-          {palette && (
-             <div className="flex flex-wrap gap-2 mb-6 justify-between items-center bg-[#E5D5C0]/50 p-4 rounded-lg">
-                <div className="serif text-xl font-bold text-[#A84C32]">
-                   {palette.colors.length} Colors Found
-                </div>
-                <div className="flex gap-2">
-                   <button onClick={savePalette} className="px-4 py-2 bg-[#3E3832] text-[#F2E8D5] rounded hover:bg-[#5C5046] transition text-sm">Save Palette</button>
-                   <div className="h-6 w-px bg-[#A84C32]/30 mx-1"></div>
-                   <button onClick={exportJSON} className="px-3 py-2 bg-white border border-[#D8C29D] text-[#3E3832] rounded hover:bg-[#FAF5EB] transition text-xs font-mono">JSON</button>
-                   <button onClick={exportCSS} className="px-3 py-2 bg-white border border-[#D8C29D] text-[#3E3832] rounded hover:bg-[#FAF5EB] transition text-xs font-mono">CSS</button>
-                   <button onClick={exportPNG} className="px-3 py-2 bg-[#A84C32] text-white rounded hover:bg-[#C25E42] transition text-xs font-bold">Export Card</button>
-                </div>
-             </div>
-          )}
-
-          <PaletteDisplay 
-            colors={palette?.colors || []} 
-            loading={isProcessing} 
-            analyzingNames={isNaming}
-          />
-          
-          {/* Saved History */}
-          {savedPalettes.length > 0 && (
-             <div className="mt-12 pt-8 border-t border-[#D8C29D]">
-                <h3 className="serif text-2xl text-[#3E3832] mb-6">Your Collection</h3>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                  {savedPalettes.map(p => (
-                    <div key={p.id} className="bg-white p-3 rounded shadow hover:shadow-lg transition">
-                      <div className="flex h-16 rounded overflow-hidden mb-2">
-                        {p.colors.slice(0, 5).map(c => (
-                          <div key={c.hex} style={{backgroundColor: c.hex, flex: c.percentage}} className="h-full"></div>
-                        ))}
-                      </div>
-                      <h5 className="font-bold text-sm text-[#3E3832] truncate">{p.name}</h5>
-                      <div className="text-xs text-gray-500 flex justify-between mt-1">
-                         <span>{new Date(p.createdAt).toLocaleDateString()}</span>
-                         <button 
-                           onClick={() => setPalette(p)}
-                           className="text-[#A84C32] hover:underline"
-                         >Load</button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-             </div>
-          )}
-
+          {/* Color Analysis Display */}
+          <div className="lg:col-span-8">
+            <div className="flex items-center justify-between mb-6 border-b-2 border-[#A84C32] pb-2">
+              <h2 className="serif text-2xl font-bold flex items-center gap-2">
+                Pigment Palette
+                {analyzing && <span className="text-xs font-normal text-gray-400 animate-pulse ml-2">Identifying Historical Pigments...</span>}
+              </h2>
+              {colors.length > 0 && (
+                <button 
+                   onClick={() => window.print()}
+                   className="text-xs bg-[#3E3832] text-white px-3 py-1 rounded hover:bg-[#A84C32] transition-colors shadow-lg"
+                >
+                  Export Palette
+                </button>
+              )}
+            </div>
+            
+            <PaletteDisplay 
+              colors={colors} 
+              loading={loading} 
+              analyzingNames={analyzing} 
+            />
+          </div>
         </div>
       </main>
-      
-      <footer className="mt-20 py-6 text-center text-[#8C7B6C] text-sm border-t border-[#D8C29D]/50">
-        <p className="serif">Inspired by the Mogao Caves • Built with React & Gemini AI</p>
+
+      <footer className="mt-20 pt-10 text-center opacity-60">
+        <p className="serif text-sm italic">"Extracting the soul of thousands of years."</p>
+        <p className="text-[10px] mt-1">© 2025 Dunhuang Cultural Digitalization Project</p>
+        <div className="flex justify-center gap-4 mt-4">
+           <span className="w-1.5 h-1.5 rounded-full bg-[#A84C32]"></span>
+           <span className="w-1.5 h-1.5 rounded-full bg-[#4B5E52]"></span>
+           <span className="w-1.5 h-1.5 rounded-full bg-[#2E4E7E]"></span>
+        </div>
       </footer>
     </div>
   );
-}
+};
 
 export default App;
